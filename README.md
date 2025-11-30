@@ -86,6 +86,6 @@ Este proyecto fue desarrollado y es mantenido por:
 
 | Nombre / Alias | Rol | Contacto |
 | :--- | :--- | :--- |
-| **ReynDev** | Desarrollador Principal | [Tu Perfil de GitHub](https://github.com/lildevreyn) o (https://guns.lol/1xok) |
+| **ReynDev** | Desarrollador Principal | [Tu Perfil de GitHub](https://github.com/lildevreyn) o https://guns.lol/1xok |
 
 ¡Gracias por tu interés\! Si encuentras algún error o tienes sugerencias, no dudes en abrir un *Issue* en este repositorio.
