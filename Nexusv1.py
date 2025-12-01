@@ -74,6 +74,8 @@ class CustomHelpCommand(commands.HelpCommand):
             "`!invite` / `/invite`: Genera un enlace de invitación para el bot.",
             "`/admin-setlogs <canal>`: Configura el canal de logs.",
             "`/admin-panelrol`: Muestra el panel de auto-roles.",
+            "`/admin-settickets <rol> <categoría>`: Configura el sistema de tickets.",
+            "`/admin-ticketpanel`: Muestra el panel de tickets.",
             "`/admin-setmoney <user> <monto>`: Establece el saldo (Admin).",
             "`!sync` (Solo !): Sincroniza comandos (Owner)."
         )
@@ -82,6 +84,70 @@ class CustomHelpCommand(commands.HelpCommand):
         embed.set_footer(text=f"Prefijo: {prefix} | Desarrollado por ReynDev.")
         await ctx.send(embed=embed)
 
+class TicketPanelView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Soporte General", style=discord.ButtonStyle.primary, custom_id="ticket_support")
+    async def support_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await _create_ticket_channel(interaction, "Soporte")
+
+    @discord.ui.button(label="Reportar un Usuario", style=discord.ButtonStyle.danger, custom_id="ticket_report")
+    async def report_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await _create_ticket_channel(interaction, "Reporte")
+
+    @discord.ui.button(label="Otros", style=discord.ButtonStyle.secondary, custom_id="ticket_other")
+    async def other_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await _create_ticket_channel(interaction, "Otro")
+
+
+class TicketCloseView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Cerrar Ticket", style=discord.ButtonStyle.danger, custom_id="ticket_close")
+    async def close_ticket_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        config = get_ticket_config(interaction.guild.id)
+        support_role_id = config.get('support_role_id')
+        
+        if not support_role_id:
+            await interaction.response.send_message("El rol de soporte no está configurado.", ephemeral=True)
+            return
+
+        support_role = interaction.guild.get_role(support_role_id)
+
+        if support_role not in interaction.user.roles and not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("No tienes permiso para cerrar este ticket.", ephemeral=True)
+            return
+        
+        await interaction.response.send_message("El ticket se cerrará en 5 segundos...")
+        await asyncio.sleep(5)
+        await interaction.channel.delete(reason="Ticket cerrado por un moderador.")
+
+
+class RolePanelView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Obtener Rol", style=discord.ButtonStyle.success, custom_id="panel_role_button")
+    async def panel_role_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        role_id = get_panel_role(interaction.guild.id)
+        if not role_id:
+            await interaction.response.send_message("El rol del panel no está configurado.", ephemeral=True)
+            return
+
+        role = interaction.guild.get_role(role_id)
+        if not role:
+            await interaction.response.send_message("El rol configurado ya no existe.", ephemeral=True)
+            return
+
+        member = interaction.user
+        if role in member.roles:
+            await member.remove_roles(role, reason="Auto-rol quitado desde panel.")
+            await interaction.response.send_message(f"Te has quitado el rol **{role.name}**.", ephemeral=True)
+        else:
+            await member.add_roles(role, reason="Auto-rol asignado desde panel.")
+            await interaction.response.send_message(f"¡Has obtenido el rol **{role.name}**!", ephemeral=True)
 
 # ----------------------------------------------------
 # 2. CONFIGURACIÓN Y CONSTANTES
@@ -164,7 +230,8 @@ def initialize_db():
                 log_channel_id INTEGER,
                 report_channel_id INTEGER,
                 report_role_id INTEGER,
-                autorole_id INTEGER
+                autorole_id INTEGER,
+                panel_role_id INTEGER
             )
         """)
 
@@ -243,6 +310,14 @@ def initialize_db():
                 PRIMARY KEY (user1_id, user2_id, guild_id)
             )
         """)
+        
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS ticket_configs (
+                guild_id INTEGER PRIMARY KEY,
+                support_role_id INTEGER,
+                ticket_category_id INTEGER
+            )
+        """)
 
         conn.commit()
 
@@ -277,7 +352,23 @@ def get_report_config(guild: discord.Guild) -> tuple[Optional[discord.TextChanne
     role = guild.get_role(config.get('report_role_id'))
     return channel, role
 
+def get_ticket_config(guild_id: int) -> dict:
+    """Obtiene la configuración de tickets del servidor."""
+    with closing(sqlite3.connect(DB_NAME)) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT support_role_id, ticket_category_id FROM ticket_configs WHERE guild_id = ?", (guild_id,))
+        result = cursor.fetchone()
+        if result:
+            return {'support_role_id': result[0], 'ticket_category_id': result[1]}
+        return {}
 
+def get_panel_role(guild_id: int) -> Optional[int]:
+    """Obtiene el ID del rol del panel de auto-asignación."""
+    with closing(sqlite3.connect(DB_NAME)) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT panel_role_id FROM config WHERE guild_id = ?", (guild_id,))
+        result = cursor.fetchone()
+        return result[0] if result else None
 # --- Funciones de Economía ---
 
 def get_balance(user_id: int, guild_id: int) -> int:
@@ -436,6 +527,64 @@ async def on_ready():
         owner = bot.get_user(OWNER_ID)
         if owner:
             await owner.send(f"🤖 **{bot.user.name}** ha iniciado correctamente. ")
+    
+    bot.add_view(TicketPanelView())
+    bot.add_view(TicketCloseView())
+    bot.add_view(RolePanelView())
+
+async def _create_ticket_channel(interaction: discord.Interaction, ticket_type: str):
+    """Crea un nuevo canal de ticket."""
+    guild = interaction.guild
+    user = interaction.user
+    config = get_ticket_config(guild.id)
+
+    support_role_id = config.get('support_role_id')
+    category_id = config.get('ticket_category_id')
+
+    if not support_role_id or not category_id:
+        await interaction.response.send_message("El sistema de tickets no está configurado.", ephemeral=True)
+        return
+
+    support_role = guild.get_role(support_role_id)
+    category = guild.get_channel(category_id)
+
+    if not support_role or not category:
+        await interaction.response.send_message("Error de configuración de tickets. Contacta a un admin.", ephemeral=True)
+        return
+
+    # Evitar crear múltiples tickets
+    ticket_channel_name = f"ticket-{user.name}-{ticket_type.lower()}"
+    existing_channel = discord.utils.get(guild.text_channels, name=ticket_channel_name)
+    if existing_channel:
+        await interaction.response.send_message(f"Ya tienes un ticket abierto en {existing_channel.mention}.", ephemeral=True)
+        return
+
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(read_messages=False),
+        user: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+        support_role: discord.PermissionOverwrite(read_messages=True, send_messages=True)
+    }
+
+    try:
+        channel = await guild.create_text_channel(
+            name=ticket_channel_name,
+            category=category,
+            overwrites=overwrites,
+            topic=f"Ticket de {user.name}. Tipo: {ticket_type}"
+        )
+    except discord.Forbidden:
+        await interaction.response.send_message("No tengo permisos para crear canales.", ephemeral=True)
+        return
+
+    embed = discord.Embed(
+        title=f"Ticket de {ticket_type}",
+        description=f"Hola {user.mention}, ¡gracias por contactarnos! Un miembro de {support_role.mention} te atenderá pronto. "
+                    f"Por favor, describe tu problema con el mayor detalle posible.",
+        color=discord.Color.green()
+    )
+    await channel.send(embed=embed, view=TicketCloseView())
+    await interaction.response.send_message(f"Ticket creado en {channel.mention}", ephemeral=True)
+
 
 
 @tasks.loop(minutes=1)
@@ -829,7 +978,73 @@ async def slash_report(interaction: discord.Interaction, member: discord.Member,
     await report_channel.send(content=mention_str, embed=embed)
     await interaction.response.send_message(embed=create_success_embed("Reporte Enviado", "Tu reporte ha sido enviado a los moderadores. Gracias."), ephemeral=True)
 
+@bot.tree.command(name='admin-settickets', description='⚙️ Configura el sistema de tickets.')
+@discord.app_commands.describe(support_role='El rol que atenderá los tickets.', category='La categoría donde se crearán los tickets.')
+@discord.app_commands.checks.has_permissions(administrator=True)
+async def slash_settickets(interaction: discord.Interaction, support_role: discord.Role, category: discord.CategoryChannel):
+    with closing(sqlite3.connect(DB_NAME)) as conn:
+        cursor = conn.cursor()
+        cursor.execute("INSERT OR REPLACE INTO ticket_configs (guild_id, support_role_id, ticket_category_id) VALUES (?, ?, ?)",
+                       (interaction.guild.id, support_role.id, category.id))
+        conn.commit()
+    
+    await interaction.response.send_message(embed=create_success_embed("Configuración de Tickets Guardada", 
+        f"Se ha establecido que el rol {support_role.mention} atenderá los tickets en la categoría **{category.name}**."), ephemeral=True)
 
+@bot.tree.command(name='admin-ticketpanel', description='📢 Envía el panel para crear tickets a este canal.')
+@discord.app_commands.checks.has_permissions(administrator=True)
+async def slash_ticketpanel(interaction: discord.Interaction):
+    config = get_ticket_config(interaction.guild.id)
+    if not config.get('support_role_id') or not config.get('ticket_category_id'):
+        await interaction.response.send_message(embed=create_error_embed("Configuración Incompleta",
+            "El sistema de tickets no está configurado. Usa `/admin-settickets` para establecer el rol de soporte y la categoría."), ephemeral=True)
+        return
+
+    embed = discord.Embed(
+        title="🎟️ Centro de Soporte",
+        description="¿Necesitas ayuda o quieres reportar a alguien? Haz clic en uno de los botones de abajo para crear un ticket y nuestro equipo te atenderá.",
+        color=discord.Color.blue()
+    )
+    embed.set_footer(text="Los tickets son privados entre tú y el equipo de soporte.")
+    
+    await interaction.channel.send(embed=embed, view=TicketPanelView())
+    await interaction.response.send_message("✅ Panel de tickets enviado.", ephemeral=True, delete_after=5)
+
+@bot.tree.command(name='admin-setpanelrol', description='⚙️ Configura el rol para el panel de auto-asignación.')
+@discord.app_commands.describe(role='El rol que los usuarios obtendrán al hacer clic.')
+@discord.app_commands.checks.has_permissions(administrator=True)
+async def slash_setpanelrol(interaction: discord.Interaction, role: discord.Role):
+    with closing(sqlite3.connect(DB_NAME)) as conn:
+        cursor = conn.cursor()
+        cursor.execute("INSERT OR REPLACE INTO config (guild_id, panel_role_id) VALUES (?, ?)",
+                       (interaction.guild.id, role.id))
+        conn.commit()
+    
+    await interaction.response.send_message(embed=create_success_embed("Rol del Panel Guardado", 
+        f"El rol {role.mention} se asignará a través del panel de roles."), ephemeral=True)
+
+@bot.tree.command(name='admin-panelrol', description='📢 Envía el panel para obtener un rol.')
+@discord.app_commands.checks.has_permissions(administrator=True)
+async def slash_panelrol(interaction: discord.Interaction):
+    role_id = get_panel_role(interaction.guild.id)
+    if not role_id:
+        await interaction.response.send_message(embed=create_error_embed("Configuración Incompleta",
+            "El rol del panel no está configurado. Usa `/admin-setpanelrol` para establecerlo."), ephemeral=True)
+        return
+    
+    role = interaction.guild.get_role(role_id)
+    if not role:
+        await interaction.response.send_message(embed=create_error_embed("Error", "El rol configurado ya no existe."), ephemeral=True)
+        return
+
+    embed = discord.Embed(
+        title="✨ ¡Obtén tu Rol Especial!",
+        description=f"Haz clic en el botón de abajo para obtener el rol **{role.name}** y acceder a canales exclusivos o destacar en el servidor.",
+        color=role.color
+    )
+    
+    await interaction.channel.send(embed=embed, view=RolePanelView())
+    await interaction.response.send_message("✅ Panel de rol enviado.", ephemeral=True, delete_after=5)
 # ----------------------------------------------------
 # 9. COMANDOS DE BODAS (PREFIX Y SLASH)
 # ----------------------------------------------------
@@ -1490,5 +1705,3 @@ if __name__ == '__main__':
             print("ERROR: Token inválido o problema de conexión. Revisa tu Token.")
         except Exception as e:
             print(f"Ocurrió un error inesperado al iniciar el bot: {e}")
-            
-  #v1.4
