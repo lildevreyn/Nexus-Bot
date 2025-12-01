@@ -77,6 +77,8 @@ class CustomHelpCommand(commands.HelpCommand):
             "`/report <user> <razón>`: Reporta a un usuario.",
             "`/admin-setlogs <canal>`: Configura el canal de logs.",
             "`/admin-setmoney <user> <monto>`: Establece el saldo de un usuario (Admin).",
+            "`/admin-panelrol <nombre> <color>`: Crea un rol con nombre y color (Admin).",
+            f"`{prefix}invite`: Genera un enlace de invitación.",
             f"`{prefix}sync`: Sincroniza comandos Slash (Owner)."
         )
         embed.add_field(name="🛠️ Utilidad / Admin", value='\n'.join(util_cmds), inline=False)
@@ -804,6 +806,40 @@ async def slash_setautorole(interaction: discord.Interaction, role: discord.Role
         conn.commit()
 
     await interaction.response.send_message(embed=create_success_embed("Auto-Rol Configurado", f"El rol de bienvenida es ahora **{role.name}**."), ephemeral=True)
+
+
+@bot.tree.command(name='admin-panelrol', description='🎨 Crea un nuevo rol con un nombre y color específico.')
+@discord.app_commands.describe(nombre='El nombre del nuevo rol.', color='El color del rol en formato hexadecimal (ej: #FF5733).')
+@discord.app_commands.checks.has_permissions(administrator=True)
+async def slash_panelrol(interaction: discord.Interaction, nombre: str, color: str):
+    """Crea un rol con un nombre y color personalizados."""
+    if not color.startswith('#') or len(color) != 7:
+        await interaction.response.send_message(embed=create_error_embed("Error de Formato", "El color debe estar en formato hexadecimal, por ejemplo: `#FF5733`."), ephemeral=True)
+        return
+
+    try:
+        hex_color_value = int(color[1:], 16)
+        discord_color = discord.Color(hex_color_value)
+    except ValueError:
+        await interaction.response.send_message(embed=create_error_embed("Error de Color", "El código de color hexadecimal no es válido."), ephemeral=True)
+        return
+
+    if discord.utils.get(interaction.guild.roles, name=nombre):
+        await interaction.response.send_message(embed=create_error_embed("Error", f"El rol **{nombre}** ya existe en este servidor."), ephemeral=True)
+        return
+
+    try:
+        new_role = await interaction.guild.create_role(
+            name=nombre,
+            color=discord_color,
+            reason=f"Rol creado por {interaction.user.name} usando /admin-panelrol"
+        )
+        await interaction.response.send_message(embed=create_success_embed("Rol Creado", f"Se ha creado el rol {new_role.mention} con el color `{color}`."))
+    except discord.Forbidden:
+        await interaction.response.send_message(embed=create_error_embed("Permiso Denegado", "No tengo los permisos necesarios para crear roles."), ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(embed=create_error_embed("Error Inesperado", f"Ocurrió un error al crear el rol: `{e}`"), ephemeral=True)
+
 
 @bot.tree.command(name='report', description='🗣️ Reporta a un usuario o mensaje a los moderadores.')
 @discord.app_commands.describe(member='El usuario a reportar.', reason='Razón del reporte.')
