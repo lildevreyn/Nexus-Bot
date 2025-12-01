@@ -77,6 +77,7 @@ class CustomHelpCommand(commands.HelpCommand):
             "`/report <user> <razón>`: Reporta a un usuario.",
             "`/admin-setlogs <canal>`: Configura el canal de logs.",
             "`/admin-setmoney <user> <monto>`: Establece el saldo de un usuario (Admin).",
+            f"`{prefix}invite`: Genera un enlace de invitación.",
             f"`{prefix}sync`: Sincroniza comandos Slash (Owner)."
         )
         embed.add_field(name="🛠️ Utilidad / Admin", value='\n'.join(util_cmds), inline=False)
