@@ -9,6 +9,57 @@ import asyncio
 from typing import Optional
 import os
 from flask import Flask  # Para mantener el bot vivo en Render
+import yt_dlp
+
+# ----------------------------------------------------
+# 1. YTDL y FFMPEG Opciones
+# ----------------------------------------------------
+
+ytdl_format_options = {
+    'format': 'bestaudio/best',
+    'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
+    'restrictfilenames': True,
+    'noplaylist': True,
+    'nocheckcertificate': True,
+    'ignoreerrors': False,
+    'logtostderr': False,
+    'quiet': True,
+    'no_warnings': True,
+    'default_search': 'auto',
+    'source_address': '0.0.0.0',  # bind to ipv4 since ipv6 addresses cause issues sometimes
+}
+
+ffmpeg_options = {
+    'options': '-vn',
+}
+
+ytdl = yt_dlp.YoutubeDL(ytdl_format_options)
+
+music_queues = {}
+
+class YTDLSource(discord.PCMVolumeTransformer):
+    def __init__(self, source, *, data, volume=0.5):
+        super().__init__(source, volume)
+        self.data = data
+        self.title = data.get('title')
+        self.url = data.get('url')
+
+    @classmethod
+    async def from_url(cls, url, *, loop=None, stream=False):
+        loop = loop or asyncio.get_event_loop()
+        data = await loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=not stream))
+        if 'entries' in data:
+            data = data['entries'][0]
+        filename = data['url'] if stream else ytdl.prepare_filename(data)
+        return cls(discord.FFmpegPCMAudio(filename, **ffmpeg_options), data=data)
+
+def play_next(ctx):
+    if len(music_queues[ctx.guild.id]) > 0:
+        source = music_queues[ctx.guild.id].pop(0)
+        ctx.voice_client.play(source, after=lambda x: play_next(ctx))
+        asyncio.run_coroutine_threadsafe(ctx.send(f"Ahora reproduciendo: **{source.title}**"), bot.loop)
+    else:
+        asyncio.run_coroutine_threadsafe(ctx.voice_client.disconnect(), bot.loop)
 
 # ----------------------------------------------------
 # 1. CLASE DE AYUDA PERSONALIZADA
@@ -467,27 +518,67 @@ async def on_message(message: discord.Message):
     await bot.process_commands(message)
 
 
-@bot.command(name='play', aliases=['p'])
+@bot.event
+async def on_message_delete(message: discord.Message):
+    """Registra los mensajes eliminados en el canal de logs."""
+    if message.author.bot or not message.guild:
+        return
+
+    log_channel = get_log_channel(message.guild)
+    if log_channel:
+        embed = discord.Embed(
+            title="🗑️ Mensaje Eliminado",
+            description=f"**Autor:** {message.author.mention}\n"
+                        f"**Canal:** {message.channel.mention}\n"
+                        f"**Contenido:**\n{message.content}",
+            color=discord.Color.orange(),
+            timestamp=datetime.now()
+        )
+        await log_channel.send(embed=embed)
+
+
+@bot.hybrid_command(name='play', aliases=['p'], description="Reproduce música en el canal de voz.")
 async def play(ctx, *, search: str):
-    await ctx.send(embed=create_error_embed("Música", "Este es un placeholder. Lógica: Reproducir o añadir a la cola."))
+    if ctx.author.voice is None:
+        return await ctx.send("No estás en un canal de voz.")
 
-@bot.command(name='stop')
+    if ctx.voice_client is None:
+        await ctx.author.voice.channel.connect()
+    else:
+        await ctx.voice_client.move_to(ctx.author.voice.channel)
+
+    if ctx.guild.id not in music_queues:
+        music_queues[ctx.guild.id] = []
+
+    # If the search is not a URL, perform a YouTube search.
+    if not search.startswith('http'):
+        search = f"ytsearch:{search}"
+
+    player = await YTDLSource.from_url(search, loop=bot.loop, stream=True)
+
+    if ctx.voice_client.is_playing() or ctx.voice_client.is_paused():
+        music_queues[ctx.guild.id].append(player)
+        await ctx.send(f'**{player.title}** ha sido añadido a la cola.')
+    else:
+        ctx.voice_client.play(player, after=lambda x: play_next(ctx))
+        await ctx.send(f"Ahora reproduciendo: **{player.title}**")
+
+@bot.hybrid_command(name='stop', description="Detiene la música y desconecta al bot.")
 async def stop(ctx):
-    await ctx.send(embed=create_error_embed("Música", "Este es un placeholder. Lógica: Detener y desconectar."))
+    if ctx.voice_client:
+        await ctx.voice_client.disconnect()
+        music_queues[ctx.guild.id] = []
+        await ctx.send("Reproducción detenida y el bot ha sido desconectado.")
 
-@bot.command(name='skip', aliases=['s'])
+@bot.hybrid_command(name='skip', aliases=['s'], description="Salta la canción actual.")
 async def skip(ctx):
-    await ctx.send(embed=create_error_embed("Música", "Este es un placeholder. Lógica: Saltar la canción actual."))
+    if ctx.voice_client and ctx.voice_client.is_playing():
+        ctx.voice_client.stop()
+        await ctx.send("Canción saltada.")
 
 
-@bot.hybrid_command(
-    name="sync",
-    description="Sincroniza los comandos de barra (slash commands) del bot."
-)
+@bot.command(name="sync")
 @commands.is_owner()
-@discord.app_commands.describe(
-    scope="Elige 'global' para todos los servidores o 'local' para el servidor actual."
-)
 async def sync(ctx: commands.Context, scope: Optional[str] = 'local'):
     """
     Sincroniza los comandos de barra (slash commands) del bot.
@@ -781,7 +872,7 @@ async def slash_report(interaction: discord.Interaction, member: discord.Member,
     await interaction.response.send_message(embed=create_success_embed("Reporte Enviado", "Tu reporte ha sido enviado a los moderadores. Gracias."), ephemeral=True)
 
 
-@bot.command(name='marry', description='💍 Propón matrimonio a otro usuario.')
+@bot.hybrid_command(name='marry', description='Propón matrimonio a otro usuario.')
 async def marry(ctx, member: discord.Member):
     user1_id = ctx.author.id
     user2_id = member.id
@@ -821,7 +912,7 @@ async def marry(ctx, member: discord.Member):
         await message.edit(embed=create_error_embed("Propuesta Rechazada", f"**{member.display_name}** ha rechazado la propuesta de matrimonio."), content=None)
         await message.clear_reactions()
 
-@bot.command(name='divorce')
+@bot.hybrid_command(name='divorce', description="Inicia el proceso de divorcio.")
 async def divorce(ctx):
     user_id = ctx.author.id
     guild_id = ctx.guild.id
@@ -854,7 +945,7 @@ async def divorce(ctx):
     await message.edit(embed=create_success_embed("Divorcio Consumado", f"**{ctx.author.display_name}** se ha divorciado de **{partner_name}**. ¡Libertad!"), content=None)
     await message.clear_reactions()
 
-@bot.command(name='spouse', aliases=['wife', 'husband'])
+@bot.hybrid_command(name='spouse', aliases=['wife', 'husband'], description="Muestra con quién estás casado.")
 async def spouse(ctx):
     user_id = ctx.author.id
     guild_id = ctx.guild.id
@@ -876,19 +967,22 @@ async def spouse(ctx):
     await ctx.send(embed=embed)
 
 
-@bot.command(name="invite", help="¡Miau! Consigue el enlace para invitar a este michi a tu servidor.")
-async def invite_prefix(ctx):
+@bot.hybrid_command(name="invite", description="¡Miau! Consigue el enlace para invitar a este michi a tu servidor.")
+async def invite(ctx: commands.Context):
+    """Genera un enlace para invitar al bot a un servidor."""
     invite_url = generate_invite_link(CLIENT_ID_INVITE, PERMISSION_CODE_INVITE)
     embed = discord.Embed(
-        title="🎀 ¡Hora de Jugar! Invítame a tu Servidor",
-        description=f"¡Miau! Soy un gatito muy útil. Haz clic en este enlace para adoptarme y que juegue en tu casa. ¡Te prometo muchos comandos y ronroneos!\n\n**[Invitar a {ctx.bot.user.name} 🐾]({invite_url})**",
-        color=discord.Color.from_rgb(173, 216, 230) 
+        title="🎀 ¡Invítame a tu Servidor!",
+        description=f"¡Hola! Soy **{ctx.bot.user.name}**. Haz clic en el enlace de abajo para añadirme a tu servidor y disfrutar de mis funciones.\n\n"
+                    f"**[Haz clic aquí para invitar]({invite_url})**",
+        color=discord.Color.from_rgb(173, 216, 230)
     )
     embed.set_thumbnail(url=ctx.bot.user.display_avatar.url)
-    await ctx.send(embed=embed)
+    embed.set_footer(text="¡Gracias por tu apoyo! 💖")
+    await ctx.send(embed=embed, ephemeral=True)
 
 
-@bot.command(name='balance', aliases=['bal'])
+@bot.hybrid_command(name='balance', aliases=['bal'], description="Muestra tu saldo o el de otro usuario.")
 async def balance(ctx, member: discord.Member = None):
     member = member or ctx.author
     balance = get_balance(member.id, ctx.guild.id)
@@ -900,7 +994,7 @@ async def balance(ctx, member: discord.Member = None):
     await ctx.send(embed=embed)
 
 
-@bot.command(name='daily')
+@bot.hybrid_command(name='daily', description="Reclama tu recompensa diaria.")
 async def daily(ctx):
     user_id = ctx.author.id
     guild_id = ctx.guild.id
@@ -918,7 +1012,7 @@ async def daily(ctx):
     await ctx.send(embed=create_success_embed("Recompensa Diaria", f"Has reclamado tu recompensa diaria de **{DAILY_REWARD} 💰**."))
 
 
-@bot.command(name='work')
+@bot.hybrid_command(name='work', description="Trabaja para ganar dinero.")
 async def work(ctx):
     user_id = ctx.author.id
     guild_id = ctx.guild.id
@@ -939,7 +1033,7 @@ async def work(ctx):
     await ctx.send(embed=create_success_embed("Trabajo Realizado", f"Fuiste a **{job}** y ganaste **{earnings} 💰**."))
 
 
-@bot.command(name='flip')
+@bot.hybrid_command(name='flip', description="Apuesta a cara o cruz.")
 async def flip(ctx, side: str, amount: int):
     side = side.lower()
     if side not in ['cara', 'cruz']:
@@ -963,7 +1057,7 @@ async def flip(ctx, side: str, amount: int):
         await ctx.send(embed=create_error_embed("Perdiste", f"Salió **{result}**. Perdiste **{amount} 💰**. Saldo: {new_balance} 💰"))
 
 
-@bot.command(name='slots')
+@bot.hybrid_command(name='slots', description="Juega a las tragaperras.")
 async def slots(ctx, amount: int):
     if amount <= 0:
         await ctx.send(embed=create_error_embed("Error", "La cantidad debe ser positiva."), delete_after=10)
@@ -991,7 +1085,7 @@ async def slots(ctx, amount: int):
     await ctx.send(embed=embed)
 
 
-@bot.command(name='rob')
+@bot.hybrid_command(name='rob', description="Intenta robar dinero a otro usuario.")
 async def rob(ctx, member: discord.Member):
     user_id = ctx.author.id
     guild_id = ctx.guild.id
@@ -1024,17 +1118,6 @@ async def rob(ctx, member: discord.Member):
         await ctx.send(embed=create_error_embed("¡Atrapado! 🚨", f"Fuiste atrapado intentando robar a {member.display_name}. Tuviste que pagar una multa de **{fine} 💰**."))
 
 
-@bot.tree.command(name="invite", description="¡Miau! Consigue el enlace para invitar a este michi a tu servidor.")
-async def invite_slash(interaction: discord.Interaction):
-    invite_url = generate_invite_link(CLIENT_ID_INVITE, PERMISSION_CODE_INVITE)
-    embed = discord.Embed(
-        title="🐾 ¡Adóptame! Enlace de Invitación",
-        description=f"**{interaction.user.display_name}**, este michi necesita un hogar en tu servidor. ¡Haz clic en el botón para traerme!\n\n**[Invitación de Nexus Bot 🐱]({invite_url})**",
-        color=discord.Color.from_rgb(255, 192, 203) 
-    )
-    embed.set_thumbnail(url=interaction.client.user.display_avatar.url)
-    embed.set_footer(text="Gracias por querer a este gatito 💖")
-    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 def get_leaderboard_data(guild_id):
@@ -1046,7 +1129,7 @@ def get_leaderboard_data(guild_id):
             )
             return cursor.fetchall()
 
-@bot.command(name='rank')
+@bot.hybrid_command(name='rank', description="Muestra tu nivel y XP o el de otro usuario.")
 async def rank(ctx, member: discord.Member = None):
     member = member or ctx.author
     xp, level, _ = get_level_data(member.id, ctx.guild.id)
@@ -1060,7 +1143,7 @@ async def rank(ctx, member: discord.Member = None):
     await ctx.send(embed=embed)
 
 
-@bot.command(name='leaderboard', aliases=['top'])
+@bot.hybrid_command(name='leaderboard', aliases=['top'], description="Muestra la tabla de clasificación de niveles.")
 async def leaderboard(ctx):
     top_users = get_leaderboard_data(ctx.guild.id)
     if not top_users:
@@ -1112,7 +1195,7 @@ async def slash_addshoprole(interaction: discord.Interaction, role: discord.Role
     await interaction.response.send_message(embed=create_success_embed("Rol Añadido a la Tienda", f"El rol **{role.name}** está ahora a la venta por **{price} 💰**."), ephemeral=True)
 
 
-@bot.command(name='shop')
+@bot.hybrid_command(name='shop', description="Muestra la tienda de roles.")
 async def shop(ctx):
     shop_roles = get_shop_roles(ctx.guild.id)
     if not shop_roles:
@@ -1131,7 +1214,7 @@ async def shop(ctx):
     await ctx.send(embed=embed)
 
 
-@bot.command(name='buyrole')
+@bot.hybrid_command(name='buyrole', description="Compra un rol de la tienda.")
 async def buyrole(ctx, *, role_name: str):
     role_name = role_name.strip()
     shop_roles = get_shop_roles(ctx.guild.id)
