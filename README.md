@@ -51,7 +51,7 @@ Recuerda que el prefijo principal es **`!`**. Los comandos de moderación y repo
 | `!divorce` | Inicia el proceso para disolver el matrimonio. | `!divorce` |
 | `!spouse` | Muestra con quién estás casado y el tiempo que llevan juntos. | `!spouse` |
 
-#### 🎶 Música (Prefix: `!`)
+#### 🎶 Música (Prefix: `!`) Eliminado
 
 | Comando | Descripción | Uso de Ejemplo |
 | :--- | :--- | :--- |
