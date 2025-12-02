@@ -37,6 +37,7 @@ class CustomHelpCommand(commands.HelpCommand):
 OWNER_ID = 1224791534436749354
 PREFIX = '!'
 INTENTS = discord.Intents.all()
+INTENTS.message_content = True  # <-- Habilitar el intent de contenido de mensajes
 MUTE_ROLE_NAME = "Silenciado"
 DAILY_REWARD = 500
 ECONOMY_COOLDOWN_DAILY_HOURS = 24
@@ -347,7 +348,82 @@ async def create_role_if_not_exists(guild, role_name):
     return role
 
 # ----------------------------------------------------
-# 6. EVENTOS Y TAREAS
+# 6. MANEJO DE ERRORES GLOBALES
+# ----------------------------------------------------
+
+@bot.event
+async def on_command_error(ctx, error):
+    """Manejador de errores para comandos de prefijo (!)."""
+    if isinstance(error, commands.CommandNotFound):
+        # No hacer nada si el comando simplemente no existe
+        return
+    elif isinstance(error, commands.MissingRequiredArgument):
+        embed = create_error_embed(
+            "Argumento Faltante",
+            f"Te falta un argumento necesario. Revisa el comando de ayuda (`{ctx.prefix}help`) para más detalles."
+        )
+        await ctx.send(embed=embed)
+    elif isinstance(error, commands.BadArgument):
+        embed = create_error_embed(
+            "Argumento Inválido",
+            "El tipo de argumento que proporcionaste es incorrecto (ej. mencionaste un rol en lugar de un usuario)."
+        )
+        await ctx.send(embed=embed)
+    elif isinstance(error, commands.CommandOnCooldown):
+        # Informar al usuario sobre el cooldown
+        remaining = str(timedelta(seconds=int(error.retry_after)))
+        embed = create_error_embed(
+            "Comando en Cooldown",
+            f"Este comando está en enfriamiento. Inténtalo de nuevo en `{remaining}`."
+        )
+        await ctx.send(embed=embed)
+    elif isinstance(error, commands.CheckFailure):
+        # Error de permisos para comandos de prefijo
+        embed = create_error_embed(
+            "Permisos Insuficientes",
+            "No tienes los permisos necesarios para ejecutar este comando."
+        )
+        await ctx.send(embed=embed, ephemeral=True)
+    else:
+        # Para cualquier otro error, registrarlo y notificar al usuario
+        print(f"Error no manejado en comando '{ctx.command}': {error}")
+        embed = create_error_embed(
+            "Error Inesperado",
+            "Ha ocurrido un error inesperado al procesar el comando. El desarrollador ha sido notificado."
+        )
+        await ctx.send(embed=embed)
+
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: discord.app_commands.AppCommandError):
+    """Manejador de errores para comandos de barra (/)."""
+    if isinstance(error, discord.app_commands.errors.MissingPermissions):
+        embed = create_error_embed(
+            "Permisos Insuficientes",
+            "No tienes los permisos necesarios para ejecutar este comando."
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+    elif isinstance(error, discord.app_commands.errors.CommandOnCooldown):
+        remaining = str(timedelta(seconds=int(error.retry_after)))
+        embed = create_error_embed(
+            "Comando en Cooldown",
+            f"Este comando está en enfriamiento. Inténtalo de nuevo en `{remaining}`."
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+    else:
+        # Para cualquier otro error, registrarlo y notificar
+        print(f"Error no manejado en comando de barra: {error}")
+        embed = create_error_embed(
+            "Error Inesperado",
+            "Ha ocurrido un error inesperado. El desarrollador ha sido notificado."
+        )
+        # Usar follow-up si la interacción ya fue respondida
+        if interaction.response.is_done():
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        else:
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+
+# ----------------------------------------------------
+# 7. EVENTOS Y TAREAS
 # ----------------------------------------------------
 
 @bot.event
@@ -395,21 +471,31 @@ async def on_message(message):
         await bot.process_commands(message)
         return
 
-    # Sistema XP
-    user_id = message.author.id
-    guild_id = message.guild.id
-    current_time = time.time()
-    xp, level, last_msg = get_level_data(user_id, guild_id)
-    
-    if current_time - last_msg >= XP_COOLDOWN_SECONDS:
-        new_level, leveled_up = update_level_data(user_id, guild_id, XP_PER_MESSAGE, current_time)
-        if leveled_up:
-            await message.channel.send(f"🎉 ¡{message.author.mention} subió al Nivel **{new_level}**!")
+    # --- Sistema de Experiencia (XP) ---
+    try:
+        user_id = message.author.id
+        guild_id = message.guild.id
+        current_time = time.time()
 
+        # Obtener datos de nivelación
+        xp, level, last_msg = get_level_data(user_id, guild_id)
+
+        # Comprobar si ha pasado el cooldown para dar XP
+        if current_time - last_msg >= XP_COOLDOWN_SECONDS:
+            # Actualizar datos y verificar si subió de nivel
+            new_level, leveled_up = update_level_data(user_id, guild_id, XP_PER_MESSAGE, current_time)
+            if leveled_up:
+                await message.channel.send(f"🎉 ¡Felicidades, {message.author.mention}! Has subido al **Nivel {new_level}**.")
+    except Exception as e:
+        # Si algo falla en el sistema de XP (ej. DB desconectada),
+        # simplemente lo imprimimos en la consola sin detener el bot.
+        print(f"Error en el sistema de XP: {e}")
+
+    # Es MUY importante procesar los comandos DESPUÉS de cualquier otra lógica
     await bot.process_commands(message)
 
 # ----------------------------------------------------
-# 7. COMANDOS (Resumen adaptado a Postgres)
+# 8. COMANDOS DE MODERACIÓN Y OTROS
 # ----------------------------------------------------
 
 # Logs
