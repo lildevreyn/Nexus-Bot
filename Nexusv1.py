@@ -550,6 +550,10 @@ async def play(ctx, *, search: str):
     if ctx.guild.id not in music_queues:
         music_queues[ctx.guild.id] = []
 
+    # If the search is not a URL, perform a YouTube search.
+    if not search.startswith('http'):
+        search = f"ytsearch:{search}"
+
     player = await YTDLSource.from_url(search, loop=bot.loop, stream=True)
     
     if ctx.voice_client.is_playing() or ctx.voice_client.is_paused():
