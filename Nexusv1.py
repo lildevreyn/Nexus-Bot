@@ -1,13 +1,14 @@
 import discord
 from discord.ext import commands, tasks
-import sqlite3
+import psycopg2  # Reemplaza sqlite3
 import random
 import time
 from datetime import datetime, timedelta
-from contextlib import closing
+from contextlib import contextmanager  # Para un mejor manejo de la conexión
 import asyncio
 from typing import Optional
 import os
+from flask import Flask  # Para mantener el bot vivo en Render
 
 # ----------------------------------------------------
 # 1. CLASE DE AYUDA PERSONALIZADA
@@ -86,24 +87,17 @@ class CustomHelpCommand(commands.HelpCommand):
 # 2. CONFIGURACIÓN Y CONSTANTES
 # ----------------------------------------------------
 
-
 OWNER_ID = 1224791534436749354
-
-
 PREFIX = '!'
-DB_NAME = 'bot_data.db'
 INTENTS = discord.Intents.all()
 MUTE_ROLE_NAME = "Silenciado"
-
-
 DAILY_REWARD = 500
 ECONOMY_COOLDOWN_DAILY_HOURS = 24
 ECONOMY_COOLDOWN_WORK_HOURS = 1
-
-
 XP_PER_MESSAGE = 15
 XP_COOLDOWN_SECONDS = 60
 
+DATABASE_URL = os.getenv('DATABASE_URL')
 
 bot = commands.Bot(command_prefix=PREFIX, intents=INTENTS)
 bot.help_command = CustomHelpCommand()
@@ -151,116 +145,108 @@ async def create_role_if_not_exists(guild: discord.Guild, role_name: str) -> dis
 # 4. FUNCIONES DE UTILIDAD DE BASE DE DATOS (DB)
 # ----------------------------------------------------
 
+@contextmanager
+def get_db_connection():
+    """Crea y maneja una conexión a la base de datos PostgreSQL."""
+    try:
+        conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+        yield conn
+    finally:
+        if conn:
+            conn.close()
+
 def initialize_db():
-    """Inicializa la base de datos y crea las tablas necesarias."""
-    with closing(sqlite3.connect(DB_NAME)) as conn:
-        cursor = conn.cursor()
+    """Inicializa la base de datos PostgreSQL y crea las tablas necesarias."""
+    with get_db_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS config (
+                    guild_id BIGINT PRIMARY KEY,
+                    log_channel_id BIGINT,
+                    report_channel_id BIGINT,
+                    report_role_id BIGINT,
+                    autorole_id BIGINT
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS temp_mutes (
+                    user_id BIGINT,
+                    guild_id BIGINT,
+                    unmute_time DOUBLE PRECISION,
+                    PRIMARY KEY (user_id, guild_id)
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS warnings (
+                    id SERIAL PRIMARY KEY,
+                    user_id BIGINT,
+                    guild_id BIGINT,
+                    moderator_id BIGINT,
+                    reason TEXT,
+                    timestamp TEXT
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS economy (
+                    user_id BIGINT,
+                    guild_id BIGINT,
+                    balance INTEGER DEFAULT 0,
+                    PRIMARY KEY (user_id, guild_id)
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS cooldowns (
+                    user_id BIGINT,
+                    guild_id BIGINT,
+                    action TEXT,
+                    last_time DOUBLE PRECISION,
+                    PRIMARY KEY (user_id, guild_id, action)
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS leveling (
+                    user_id BIGINT,
+                    guild_id BIGINT,
+                    xp INTEGER DEFAULT 0,
+                    level INTEGER DEFAULT 0,
+                    last_message_time DOUBLE PRECISION DEFAULT 0,
+                    PRIMARY KEY (user_id, guild_id)
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS role_shop (
+                    guild_id BIGINT,
+                    role_id BIGINT,
+                    price INTEGER,
+                    PRIMARY KEY (guild_id, role_id)
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS marriages (
+                    user1_id BIGINT,
+                    user2_id BIGINT,
+                    guild_id BIGINT,
+                    marriage_date TEXT,
+                    PRIMARY KEY (user1_id, user2_id, guild_id)
+                )
+            """)
+            conn.commit()
 
-
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS config (
-                guild_id INTEGER PRIMARY KEY,
-                log_channel_id INTEGER,
-                report_channel_id INTEGER,
-                report_role_id INTEGER,
-                autorole_id INTEGER
-            )
-        """)
-
-
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS temp_mutes (
-                user_id INTEGER,
-                guild_id INTEGER,
-                unmute_time REAL,
-                PRIMARY KEY (user_id, guild_id)
-            )
-        """)
-
-
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS warnings (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                guild_id INTEGER,
-                moderator_id INTEGER,
-                reason TEXT,
-                timestamp TEXT
-            )
-        """)
-
-
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS economy (
-                user_id INTEGER,
-                guild_id INTEGER,
-                balance INTEGER DEFAULT 0,
-                PRIMARY KEY (user_id, guild_id)
-            )
-        """)
-
-
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS cooldowns (
-                user_id INTEGER,
-                guild_id INTEGER,
-                action TEXT,
-                last_time REAL,
-                PRIMARY KEY (user_id, guild_id, action)
-            )
-        """)
-
-
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS leveling (
-                user_id INTEGER,
-                guild_id INTEGER,
-                xp INTEGER DEFAULT 0,
-                level INTEGER DEFAULT 0,
-                last_message_time REAL DEFAULT 0,
-                PRIMARY KEY (user_id, guild_id)
-            )
-        """)
-
-
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS role_shop (
-                guild_id INTEGER,
-                role_id INTEGER,
-                price INTEGER,
-                PRIMARY KEY (guild_id, role_id)
-            )
-        """)
-
-
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS marriages (
-                user1_id INTEGER,
-                user2_id INTEGER,
-                guild_id INTEGER,
-                marriage_date TEXT,
-                PRIMARY KEY (user1_id, user2_id, guild_id)
-            )
-        """)
-
-        conn.commit()
-
-# --- Funciones de Configuración ---
 
 def get_config(guild: discord.Guild):
     """Obtiene la configuración del servidor."""
-    with closing(sqlite3.connect(DB_NAME)) as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT log_channel_id, report_channel_id, report_role_id, autorole_id FROM config WHERE guild_id = ?", (guild.id,))
-        result = cursor.fetchone()
-        if result:
-            return {
-                'log_channel_id': result[0],
-                'report_channel_id': result[1],
-                'report_role_id': result[2],
-                'autorole_id': result[3]
-            }
-        return {}
+    with get_db_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT log_channel_id, report_channel_id, report_role_id, autorole_id FROM config WHERE guild_id = %s", (guild.id,))
+            result = cursor.fetchone()
+            if result:
+                return {
+                    'log_channel_id': result[0],
+                    'report_channel_id': result[1],
+                    'report_role_id': result[2],
+                    'autorole_id': result[3]
+                }
+            return {}
 
 def get_log_channel(guild: discord.Guild) -> Optional[discord.TextChannel]:
     """Obtiene el canal de logs del servidor."""
@@ -277,69 +263,78 @@ def get_report_config(guild: discord.Guild) -> tuple[Optional[discord.TextChanne
     return channel, role
 
 
-# --- Funciones de Economía ---
-
 def get_balance(user_id: int, guild_id: int) -> int:
     """Obtiene el saldo de un usuario."""
-    with closing(sqlite3.connect(DB_NAME)) as conn:
-        cursor = conn.cursor()
-        cursor.execute("INSERT OR IGNORE INTO economy (user_id, guild_id) VALUES (?, ?)", (user_id, guild_id))
-        conn.commit()
-        cursor.execute("SELECT balance FROM economy WHERE user_id = ? AND guild_id = ?", (user_id, guild_id))
-        result = cursor.fetchone()
-        return result[0] if result else 0
+    with get_db_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO economy (user_id, guild_id, balance) VALUES (%s, %s, 0) ON CONFLICT (user_id, guild_id) DO NOTHING",
+                (user_id, guild_id)
+            )
+            conn.commit()
+            cursor.execute("SELECT balance FROM economy WHERE user_id = %s AND guild_id = %s", (user_id, guild_id))
+            result = cursor.fetchone()
+            return result[0] if result else 0
 
 def update_balance(user_id: int, guild_id: int, amount: int):
     """Añade o resta una cantidad al saldo de un usuario."""
-    with closing(sqlite3.connect(DB_NAME)) as conn:
-        cursor = conn.cursor()
-        cursor.execute("INSERT OR IGNORE INTO economy (user_id, guild_id) VALUES (?, ?)", (user_id, guild_id))
-        cursor.execute("UPDATE economy SET balance = balance + ? WHERE user_id = ? AND guild_id = ?", (amount, user_id, guild_id))
-        conn.commit()
+    with get_db_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO economy (user_id, guild_id, balance) VALUES (%s, %s, 0) ON CONFLICT (user_id, guild_id) DO NOTHING",
+                (user_id, guild_id)
+            )
+            cursor.execute("UPDATE economy SET balance = balance + %s WHERE user_id = %s AND guild_id = %s", (amount, user_id, guild_id))
+            conn.commit()
 
 def set_balance(user_id: int, guild_id: int, amount: int) -> int:
     """Establece el saldo de un usuario a una cantidad específica."""
-    with closing(sqlite3.connect(DB_NAME)) as conn:
-        cursor = conn.cursor()
-        cursor.execute("INSERT OR IGNORE INTO economy (user_id, guild_id) VALUES (?, ?)", (user_id, guild_id))
-        cursor.execute("UPDATE economy SET balance = ? WHERE user_id = ? AND guild_id = ?", (amount, user_id, guild_id))
-        conn.commit()
-        return get_balance(user_id, guild_id)
+    with get_db_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO economy (user_id, guild_id, balance) VALUES (%s, %s, 0) ON CONFLICT (user_id, guild_id) DO NOTHING",
+                (user_id, guild_id)
+            )
+            cursor.execute("UPDATE economy SET balance = %s WHERE user_id = %s AND guild_id = %s", (amount, user_id, guild_id))
+            conn.commit()
+            return get_balance(user_id, guild_id)
 
-
-# --- Funciones de Cooldowns ---
 
 def get_last_action_time(user_id: int, guild_id: int, action: str) -> float:
     """Obtiene la última hora de una acción específica (timestamp)."""
-    with closing(sqlite3.connect(DB_NAME)) as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT last_time FROM cooldowns WHERE user_id = ? AND guild_id = ? AND action = ?", (user_id, guild_id, action))
-        result = cursor.fetchone()
-        return result[0] if result else 0.0
+    with get_db_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT last_time FROM cooldowns WHERE user_id = %s AND guild_id = %s AND action = %s", (user_id, guild_id, action))
+            result = cursor.fetchone()
+            return result[0] if result else 0.0
 
 def set_last_action_time(user_id: int, guild_id: int, action: str):
     """Establece la última hora de una acción específica al tiempo actual."""
     current_time = time.time()
-    with closing(sqlite3.connect(DB_NAME)) as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT OR REPLACE INTO cooldowns (user_id, guild_id, action, last_time) VALUES (?, ?, ?, ?)",
-            (user_id, guild_id, action, current_time)
-        )
-        conn.commit()
+    with get_db_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO cooldowns (user_id, guild_id, action, last_time) VALUES (%s, %s, %s, %s)
+                ON CONFLICT (user_id, guild_id, action) DO UPDATE SET last_time = EXCLUDED.last_time
+                """,
+                (user_id, guild_id, action, current_time)
+            )
+            conn.commit()
 
-
-# --- Funciones de Nivelación (XP) ---
 
 def get_level_data(user_id: int, guild_id: int) -> tuple[int, int, float]:
     """Obtiene XP, Nivel y el último tiempo de mensaje de un usuario."""
-    with closing(sqlite3.connect(DB_NAME)) as conn:
-        cursor = conn.cursor()
-        cursor.execute("INSERT OR IGNORE INTO leveling (user_id, guild_id) VALUES (?, ?)", (user_id, guild_id))
-        conn.commit()
-        cursor.execute("SELECT xp, level, last_message_time FROM leveling WHERE user_id = ? AND guild_id = ?", (user_id, guild_id))
-        result = cursor.fetchone()
-        return result if result else (0, 0, 0.0)
+    with get_db_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO leveling (user_id, guild_id) VALUES (%s, %s) ON CONFLICT (user_id, guild_id) DO NOTHING",
+                (user_id, guild_id)
+            )
+            conn.commit()
+            cursor.execute("SELECT xp, level, last_message_time FROM leveling WHERE user_id = %s AND guild_id = %s", (user_id, guild_id))
+            result = cursor.fetchone()
+            return result if result else (0, 0, 0.0)
 
 def get_xp_needed(level: int) -> int:
     """Calcula el XP necesario para el siguiente nivel."""
@@ -347,91 +342,68 @@ def get_xp_needed(level: int) -> int:
 
 def update_level_data(user_id: int, guild_id: int, xp_to_add: int, last_message_time: float) -> tuple[int, bool]:
     """Actualiza los datos de XP y Nivel de un usuario. Retorna el nuevo nivel y si subió de nivel."""
-    with closing(sqlite3.connect(DB_NAME)) as conn:
-        cursor = conn.cursor()
-        xp, level, _ = get_level_data(user_id, guild_id)
-
-        new_xp = xp + xp_to_add
-        new_level = level
-        leveled_up = False
-        xp_needed = get_xp_needed(level)
-
-        while new_xp >= xp_needed:
-            new_xp -= xp_needed
-            new_level += 1
-            leveled_up = True
-            xp_needed = get_xp_needed(new_level) 
-
-        cursor.execute(
-            "UPDATE leveling SET xp = ?, level = ?, last_message_time = ? WHERE user_id = ? AND guild_id = ?",
-            (new_xp, new_level, last_message_time, user_id, guild_id)
-        )
-        conn.commit()
-        return new_level, leveled_up
-
-# --- Funciones de Tienda ---
+    with get_db_connection() as conn:
+        with conn.cursor() as cursor:
+            xp, level, _ = get_level_data(user_id, guild_id)
+            new_xp = xp + xp_to_add
+            new_level = level
+            leveled_up = False
+            xp_needed = get_xp_needed(level)
+            while new_xp >= xp_needed:
+                new_xp -= xp_needed
+                new_level += 1
+                leveled_up = True
+                xp_needed = get_xp_needed(new_level)
+            cursor.execute(
+                "UPDATE leveling SET xp = %s, level = %s, last_message_time = %s WHERE user_id = %s AND guild_id = %s",
+                (new_xp, new_level, last_message_time, user_id, guild_id)
+            )
+            conn.commit()
+            return new_level, leveled_up
 
 def get_shop_roles(guild_id: int) -> list[tuple[int, int]]:
     """Obtiene todos los roles a la venta en el servidor."""
-    with closing(sqlite3.connect(DB_NAME)) as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT role_id, price FROM role_shop WHERE guild_id = ?", (guild_id,))
-        return cursor.fetchall()
-
-# --- Funciones de Bodas ---
+    with get_db_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT role_id, price FROM role_shop WHERE guild_id = %s", (guild_id,))
+            return cursor.fetchall()
 
 def get_partner(user_id: int, guild_id: int) -> Optional[int]:
     """Obtiene la ID del compañero de matrimonio."""
-    with closing(sqlite3.connect(DB_NAME)) as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT user2_id, user1_id FROM marriages WHERE (user1_id = ? OR user2_id = ?) AND guild_id = ?", (user_id, user_id, guild_id))
-        result = cursor.fetchone()
-
-        if result:
-            return result[0] if result[0] != user_id else result[1]
-        return None
+    with get_db_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT user2_id, user1_id FROM marriages WHERE (user1_id = %s OR user2_id = %s) AND guild_id = %s", (user_id, user_id, guild_id))
+            result = cursor.fetchone()
+            if result:
+                return result[0] if result[0] != user_id else result[1]
+            return None
 
 def get_marriage_data(user_id: int, guild_id: int) -> Optional[tuple[int, int, str]]:
     """Obtiene (user1_id, user2_id, marriage_date) de un matrimonio."""
-    with closing(sqlite3.connect(DB_NAME)) as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT user1_id, user2_id, marriage_date FROM marriages WHERE (user1_id = ? OR user2_id = ?) AND guild_id = ?", (user_id, user_id, guild_id))
-        return cursor.fetchone()
+    with get_db_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT user1_id, user2_id, marriage_date FROM marriages WHERE (user1_id = %s OR user2_id = %s) AND guild_id = %s", (user_id, user_id, guild_id))
+            return cursor.fetchone()
 
-# ----------------------------------------------------
-# [NUEVA SECCIÓN] 4.5. FUNCIONES DE UTILIDAD DE INVITACIÓN
-# ----------------------------------------------------
-
-CLIENT_ID_INVITE = "1443693871061008457"  # Mantén tu ID de cliente
-PERMISSION_CODE_INVITE = 8               # Código de permisos (8 = Administrador)
+CLIENT_ID_INVITE = "1443693871061008457"
+PERMISSION_CODE_INVITE = 8
 
 def generate_invite_link(client_id: str, permissions: int) -> str:
-    """Genera el enlace de invitación para el bot con los permisos especificados."""
-    # CORREGIDO: Usamos el ID y añadimos el scope 'applications.commands' y permisos
+    """Genera el enlace de invitación para el bot."""
     return f"https://discord.com/oauth2/authorize?client_id={client_id}&scope=bot%20applications.commands&permissions={permissions}"
 
-
-# ----------------------------------------------------
-# 5. EVENTOS Y TAREAS PERIÓDICAS
-# ----------------------------------------------------
 
 @bot.event
 async def on_ready():
     """Se ejecuta cuando el bot está listo y conectado a Discord."""
     print(f'Bot conectado como {bot.user.name} (ID: {bot.user.id})')
     initialize_db()
-
-    # Sincronización automática de comandos slash
     try:
         await bot.tree.sync()
         print("Comandos Slash sincronizados exitosamente.")
     except Exception as e:
         print(f"Error al sincronizar comandos Slash: {e}")
-
-    # Iniciar tareas en bucle
     check_mutes.start()
-
-    # Notificación de inicio
     if OWNER_ID != 1224791534436749354:
         owner = bot.get_user(OWNER_ID)
         if owner:
@@ -442,32 +414,24 @@ async def on_ready():
 async def check_mutes():
     """Revisa la base de datos para desmutear usuarios cuyo tiempo ha expirado."""
     current_time = time.time()
-
-    with closing(sqlite3.connect(DB_NAME)) as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT user_id, guild_id FROM temp_mutes WHERE unmute_time <= ?", (current_time,))
-        expired_mutes = cursor.fetchall()
-
-    for user_id, guild_id in expired_mutes:
-        guild = bot.get_guild(guild_id)
-        if not guild: continue
-
-        member = guild.get_member(user_id)
-        mute_role = discord.utils.get(guild.roles, name=MUTE_ROLE_NAME)
-
-        if member and mute_role and mute_role in member.roles:
-            try:
-                await member.remove_roles(mute_role, reason="Tiempo de muteo expirado.")
-                log_channel = get_log_channel(guild)
-                if log_channel:
-                    await log_channel.send(embed=discord.Embed(title="🔊 Auto-Desmuteo", description=f"{member.mention} ha sido desmuteado automáticamente.", color=discord.Color.green()))
-            except discord.Forbidden:
-                print(f"Error: No se pudo desmutear al usuario {member.id} en {guild.name} (Permisos).")
-
-        # Eliminar registro de la DB
-        with closing(sqlite3.connect(DB_NAME)) as conn:
-            cursor = conn.cursor()
-            cursor.execute("DELETE FROM temp_mutes WHERE user_id = ? AND guild_id = ?", (user_id, guild_id))
+    with get_db_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT user_id, guild_id FROM temp_mutes WHERE unmute_time <= %s", (current_time,))
+            expired_mutes = cursor.fetchall()
+            for user_id, guild_id in expired_mutes:
+                guild = bot.get_guild(guild_id)
+                if not guild: continue
+                member = guild.get_member(user_id)
+                mute_role = discord.utils.get(guild.roles, name=MUTE_ROLE_NAME)
+                if member and mute_role and mute_role in member.roles:
+                    try:
+                        await member.remove_roles(mute_role, reason="Tiempo de muteo expirado.")
+                        log_channel = get_log_channel(guild)
+                        if log_channel:
+                            await log_channel.send(embed=discord.Embed(title="🔊 Auto-Desmuteo", description=f"{member.mention} ha sido desmuteado automáticamente.", color=discord.Color.green()))
+                    except discord.Forbidden:
+                        print(f"Error: No se pudo desmutear al usuario {member.id} en {guild.name} (Permisos).")
+            cursor.execute("DELETE FROM temp_mutes WHERE unmute_time <= %s", (current_time,))
             conn.commit()
 
 
@@ -476,7 +440,6 @@ async def on_member_join(member: discord.Member):
     """Asigna el auto-rol a los nuevos miembros."""
     config = get_config(member.guild)
     autorole_id = config.get('autorole_id')
-
     if autorole_id:
         autorole = member.guild.get_role(autorole_id)
         if autorole:
@@ -489,34 +452,19 @@ async def on_member_join(member: discord.Member):
 @bot.event
 async def on_message(message: discord.Message):
     """Maneja el sistema de XP y procesa comandos."""
-
     if message.author.bot or not message.guild:
         await bot.process_commands(message)
         return
-
     user_id = message.author.id
     guild_id = message.guild.id
     current_time = time.time()
-
-    # Sistema de XP/Leveling
-    xp, level, last_message_time = get_level_data(user_id, guild_id)
-
+    _, _, last_message_time = get_level_data(user_id, guild_id)
     if current_time - last_message_time >= XP_COOLDOWN_SECONDS:
         new_level, leveled_up = update_level_data(user_id, guild_id, XP_PER_MESSAGE, current_time)
-
         if leveled_up:
             await message.channel.send(f"🎉 ¡Felicidades, {message.author.mention}! Has alcanzado el Nivel **{new_level}**.")
-
-    # Procesar comandos de prefijo (solo después del manejo de XP)
     await bot.process_commands(message)
 
-
-# ----------------------------------------------------
-# 6. COMANDOS DE MÚSICA (PREFIX)
-# ----------------------------------------------------
-
-# Nota: La lógica de comandos de Música puede ser extensa y depender de librerías como `yt-dlp` y `ffmpeg`.
-# Si tienes tu lógica de música, déjala aquí. Si no, usa estos placeholders:
 
 @bot.command(name='play', aliases=['p'])
 async def play(ctx, *, search: str):
@@ -530,17 +478,12 @@ async def stop(ctx):
 async def skip(ctx):
     await ctx.send(embed=create_error_embed("Música", "Este es un placeholder. Lógica: Saltar la canción actual."))
 
-# ----------------------------------------------------
-# 7. COMANDOS DE MODERACION (SLASH COMMANDS) - Prefijo: mod-
-# ----------------------------------------------------
 
-# [NUEVO] COMANDO DE PREFIJO DE SINCRONIZACION (Necesario para depuracion)
 @bot.command(name='sync')
 async def sync_commands(ctx):
     if ctx.author.id != OWNER_ID:
         await ctx.send(embed=create_error_embed("Permiso Denegado", "Solo el propietario del bot puede usar este comando."), ephemeral=True)
         return
-
     try:
         synced = await bot.tree.sync()
         embed = create_success_embed(
@@ -562,7 +505,6 @@ async def slash_ban(interaction: discord.Interaction, member: discord.Member, re
     if member.top_role >= interaction.user.top_role and interaction.user.id != interaction.guild.owner_id:
         await interaction.response.send_message(embed=create_error_embed("Error de Jerarquía", "No puedes banear a un usuario con un rol igual o superior."), ephemeral=True)
         return
-
     try:
         await member.ban(reason=f"Moderador: {interaction.user.name}, Razón: {reason}")
         log_channel = get_log_channel(interaction.guild)
@@ -582,7 +524,6 @@ async def slash_unban(interaction: discord.Interaction, user_id: str, reason: st
     except ValueError:
         await interaction.response.send_message(embed=create_error_embed("Error", "ID de usuario inválida."), ephemeral=True)
         return
-
     try:
         await interaction.guild.unban(user, reason=f"Moderador: {interaction.user.name}, Razón: {reason}")
         log_channel = get_log_channel(interaction.guild)
@@ -605,7 +546,6 @@ async def slash_kick(interaction: discord.Interaction, member: discord.Member, r
     if member.top_role >= interaction.user.top_role and interaction.user.id != interaction.guild.owner_id:
         await interaction.response.send_message(embed=create_error_embed("Error de Jerarquía", "No puedes expulsar a un usuario con un rol igual o superior."), ephemeral=True)
         return
-
     try:
         await member.kick(reason=f"Moderador: {interaction.user.name}, Razón: {reason}")
         log_channel = get_log_channel(interaction.guild)
@@ -630,29 +570,27 @@ async def slash_mute(interaction: discord.Interaction, member: discord.Member, d
         else:
             await interaction.response.send_message(embed=create_error_embed("Error", "Formato de duración inválido. Usa: 1d, 2h, 30m."), ephemeral=True)
             return
-
         mute_role = await create_role_if_not_exists(interaction.guild, MUTE_ROLE_NAME)
-
         if mute_role in member.roles:
             await interaction.response.send_message(embed=create_error_embed("Error", "Este usuario ya está silenciado."), ephemeral=True)
             return
-
         unmute_time = time.time() + time_delta.total_seconds()
-
-        with closing(sqlite3.connect(DB_NAME)) as conn:
-            cursor = conn.cursor()
-            cursor.execute("INSERT OR REPLACE INTO temp_mutes (user_id, guild_id, unmute_time) VALUES (?, ?, ?)", (member.id, interaction.guild.id, unmute_time))
-            conn.commit()
-
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO temp_mutes (user_id, guild_id, unmute_time) VALUES (%s, %s, %s)
+                    ON CONFLICT (user_id, guild_id) DO UPDATE SET unmute_time = EXCLUDED.unmute_time
+                    """,
+                    (member.id, interaction.guild.id, unmute_time)
+                )
+                conn.commit()
         await member.add_roles(mute_role, reason=f"Muteo temporal. Moderador: {interaction.user.name}. Razón: {reason}")
-
         log_channel = get_log_channel(interaction.guild)
         if log_channel:
             embed = discord.Embed(title="🔇 Usuario Silenciado", description=f"**Usuario:** {member.mention}\n**Moderador:** {interaction.user.mention}\n**Duración:** {duration}\n**Razón:** {reason}", color=discord.Color.dark_grey(), timestamp=datetime.now())
             await log_channel.send(embed=embed)
-
         await interaction.response.send_message(embed=create_success_embed("Silenciado", f"{member.mention} ha sido silenciado por **{duration}**. Razón: **{reason}**"))
-
     except Exception as e:
         print(f"Error al mutear: {e}")
         await interaction.response.send_message(embed=create_error_embed("Error Fatal", f"Ocurrió un error: {e}"), ephemeral=True)
@@ -662,20 +600,17 @@ async def slash_mute(interaction: discord.Interaction, member: discord.Member, d
 @discord.app_commands.checks.has_permissions(manage_roles=True)
 async def slash_unmute(interaction: discord.Interaction, member: discord.Member):
     mute_role = discord.utils.get(interaction.guild.roles, name=MUTE_ROLE_NAME)
-
     if mute_role and mute_role in member.roles:
         try:
             await member.remove_roles(mute_role, reason=f"Desmuteo manual. Moderador: {interaction.user.name}")
-            with closing(sqlite3.connect(DB_NAME)) as conn:
-                cursor = conn.cursor()
-                cursor.execute("DELETE FROM temp_mutes WHERE user_id = ?", (member.id,))
-                conn.commit()
-
+            with get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("DELETE FROM temp_mutes WHERE user_id = %s AND guild_id = %s", (member.id, interaction.guild.id))
+                    conn.commit()
             log_channel = get_log_channel(interaction.guild)
             if log_channel:
                 embed = discord.Embed(title="🔊 Usuario Desmuteado", description=f"**Usuario:** {member.mention}\n**Moderador:** {interaction.user.mention}", color=discord.Color.orange(), timestamp=datetime.now())
                 await log_channel.send(embed=embed)
-
             await interaction.response.send_message(embed=create_success_embed("Desmuteado", f"{member.mention} ha sido desmuteado."))
         except discord.Forbidden:
             await interaction.response.send_message(embed=create_error_embed("Permiso Denegado", "No tengo permisos para quitar este rol."), ephemeral=True)
@@ -689,65 +624,56 @@ async def slash_warn(interaction: discord.Interaction, member: discord.Member, r
     if member.bot:
         await interaction.response.send_message(embed=create_error_embed("Error", "No puedes advertir a un bot."), ephemeral=True)
         return
-
-    with closing(sqlite3.connect(DB_NAME)) as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO warnings (user_id, guild_id, moderator_id, reason, timestamp) VALUES (?, ?, ?, ?, ?)",
-            (member.id, interaction.guild.id, interaction.user.id, reason, datetime.now().isoformat())
-        )
-        conn.commit()
-
+    with get_db_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO warnings (user_id, guild_id, moderator_id, reason, timestamp) VALUES (%s, %s, %s, %s, %s)",
+                (member.id, interaction.guild.id, interaction.user.id, reason, datetime.now().isoformat())
+            )
+            conn.commit()
     log_channel = get_log_channel(interaction.guild)
     if log_channel:
         embed = discord.Embed(title="⚠️ Nueva Advertencia", description=f"**Usuario:** {member.mention}\n**Moderador:** {interaction.user.mention}\n**Razón:** {reason}", color=discord.Color.yellow(), timestamp=datetime.now())
         await log_channel.send(embed=embed)
-
     await interaction.response.send_message(embed=create_success_embed("Advertencia Aplicada", f"{member.mention} ha recibido una advertencia. Razón: **{reason}**"))
 
 @bot.tree.command(name='mod-warnings', description='📋 Muestra las advertencias de un usuario.')
 @discord.app_commands.describe(member='El usuario a consultar.')
 @discord.app_commands.checks.has_permissions(kick_members=True)
 async def slash_warnings(interaction: discord.Interaction, member: discord.Member):
-    with closing(sqlite3.connect(DB_NAME)) as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT moderator_id, reason, timestamp FROM warnings WHERE user_id = ? AND guild_id = ?",
-            (member.id, interaction.guild.id)
-        )
-        results = cursor.fetchall()
-
+    with get_db_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT moderator_id, reason, timestamp FROM warnings WHERE user_id = %s AND guild_id = %s",
+                (member.id, interaction.guild.id)
+            )
+            results = cursor.fetchall()
     if not results:
         await interaction.response.send_message(embed=create_success_embed("Advertencias", f"{member.display_name} no tiene advertencias."), ephemeral=True)
         return
-
     embed = discord.Embed(title=f"📋 Advertencias de {member.display_name}", color=discord.Color.blue())
-
     for i, (mod_id, reason, timestamp) in enumerate(results):
         mod = interaction.guild.get_member(mod_id)
         mod_name = mod.display_name if mod else f"ID: {mod_id}"
         date_str = datetime.fromisoformat(timestamp).strftime("%d/%m/%Y %H:%M")
-
         embed.add_field(
             name=f"Advertencia #{i+1} ({date_str})",
             value=f"**Moderador:** {mod_name}\n**Razón:** {reason}",
             inline=False
         )
-
     await interaction.response.send_message(embed=embed)
 
 @bot.tree.command(name='mod-clearwarnings', description='🧹 Elimina todas las advertencias de un usuario.')
 @discord.app_commands.describe(member='El usuario a limpiar.')
 @discord.app_commands.checks.has_permissions(administrator=True)
 async def slash_clearwarnings(interaction: discord.Interaction, member: discord.Member):
-    with closing(sqlite3.connect(DB_NAME)) as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "DELETE FROM warnings WHERE user_id = ? AND guild_id = ?",
-            (member.id, interaction.guild.id)
-        )
-        conn.commit()
-
+    with get_db_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "DELETE FROM warnings WHERE user_id = %s AND guild_id = %s",
+                (member.id, interaction.guild.id)
+            )
+            conn.commit()
     await interaction.response.send_message(embed=create_success_embed("Advertencias Eliminadas", f"Se han eliminado todas las advertencias de {member.mention}."))
 
 @bot.tree.command(name='mod-purge', description='🗑️ Elimina una cantidad específica de mensajes en el canal actual.')
@@ -757,28 +683,23 @@ async def slash_purge(interaction: discord.Interaction, amount: int):
     if amount <= 0 or amount > 100:
         await interaction.response.send_message(embed=create_error_embed("Error", "Debes especificar una cantidad entre 1 y 100."), ephemeral=True)
         return
-
-    await interaction.response.defer(ephemeral=True) # Defer para que no caduque la interacción
-
+    await interaction.response.defer(ephemeral=True)
     deleted = await interaction.channel.purge(limit=amount)
-
     embed = create_success_embed("Mensajes Eliminados", f"Se han eliminado **{len(deleted)}** mensajes en {interaction.channel.mention}.")
     await interaction.followup.send(embed=embed, ephemeral=False, delete_after=5)
 
-
-# ----------------------------------------------------
-# 8. COMANDOS DE CONFIGURACIÓN (SLASH COMMANDS) - Prefijo: admin-
-# ----------------------------------------------------
 
 @bot.tree.command(name='admin-setlogs', description='⚙️ Configura el canal para los logs de moderación.')
 @discord.app_commands.describe(channel='El canal de texto para enviar los logs.')
 @discord.app_commands.checks.has_permissions(administrator=True)
 async def slash_setlogs(interaction: discord.Interaction, channel: discord.TextChannel):
-    with closing(sqlite3.connect(DB_NAME)) as conn:
-        cursor = conn.cursor()
-        cursor.execute("INSERT OR REPLACE INTO config (guild_id, log_channel_id) VALUES (?, ?)", (interaction.guild.id, channel.id))
-        conn.commit()
-
+    with get_db_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO config (guild_id, log_channel_id) VALUES (%s, %s) ON CONFLICT (guild_id) DO UPDATE SET log_channel_id = EXCLUDED.log_channel_id",
+                (interaction.guild.id, channel.id)
+            )
+            conn.commit()
     await interaction.response.send_message(embed=create_success_embed("Logs Configurados", f"El canal de logs ha sido configurado a {channel.mention}."), ephemeral=True)
 
 @bot.tree.command(name='admin-setreport', description='🚨 Configura el canal y rol para el sistema de reportes.')
@@ -786,11 +707,13 @@ async def slash_setlogs(interaction: discord.Interaction, channel: discord.TextC
 @discord.app_commands.checks.has_permissions(administrator=True)
 async def slash_setreport(interaction: discord.Interaction, channel: discord.TextChannel, role: discord.Role = None):
     role_id = role.id if role else None
-    with closing(sqlite3.connect(DB_NAME)) as conn:
-        cursor = conn.cursor()
-        cursor.execute("INSERT OR REPLACE INTO config (guild_id, report_channel_id, report_role_id) VALUES (?, ?, ?)", (interaction.guild.id, channel.id, role_id))
-        conn.commit()
-
+    with get_db_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO config (guild_id, report_channel_id, report_role_id) VALUES (%s, %s, %s) ON CONFLICT (guild_id) DO UPDATE SET report_channel_id = EXCLUDED.report_channel_id, report_role_id = EXCLUDED.report_role_id",
+                (interaction.guild.id, channel.id, role_id)
+            )
+            conn.commit()
     role_mention = role.mention if role else "ninguno"
     await interaction.response.send_message(embed=create_success_embed("Reportes Configurados", f"El canal de reportes es {channel.mention} y el rol a mencionar es {role_mention}."), ephemeral=True)
 
@@ -798,28 +721,26 @@ async def slash_setreport(interaction: discord.Interaction, channel: discord.Tex
 @discord.app_commands.describe(role='El rol a asignar automáticamente.')
 @discord.app_commands.checks.has_permissions(administrator=True)
 async def slash_setautorole(interaction: discord.Interaction, role: discord.Role):
-    with closing(sqlite3.connect(DB_NAME)) as conn:
-        cursor = conn.cursor()
-        cursor.execute("INSERT OR REPLACE INTO config (guild_id, autorole_id) VALUES (?, ?)", (interaction.guild.id, role.id))
-        conn.commit()
-
+    with get_db_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO config (guild_id, autorole_id) VALUES (%s, %s) ON CONFLICT (guild_id) DO UPDATE SET autorole_id = EXCLUDED.autorole_id",
+                (interaction.guild.id, role.id)
+            )
+            conn.commit()
     await interaction.response.send_message(embed=create_success_embed("Auto-Rol Configurado", f"El rol de bienvenida es ahora **{role.name}**."), ephemeral=True)
 
 @bot.tree.command(name='report', description='🗣️ Reporta a un usuario o mensaje a los moderadores.')
 @discord.app_commands.describe(member='El usuario a reportar.', reason='Razón del reporte.')
 async def slash_report(interaction: discord.Interaction, member: discord.Member, reason: str):
     report_channel, report_role = get_report_config(interaction.guild)
-
     if not report_channel:
         await interaction.response.send_message(embed=create_error_embed("Error", "El canal de reportes no ha sido configurado. Pídele a un admin que use `/admin-setreport`."), ephemeral=True)
         return
-
     if member.id == interaction.user.id or member.bot:
         await interaction.response.send_message(embed=create_error_embed("Error", "No puedes reportarte a ti mismo ni a un bot."), ephemeral=True)
         return
-
     mention_str = report_role.mention if report_role else "**¡Nuevo Reporte!**"
-
     embed = discord.Embed(
         title="🚨 Reporte de Usuario",
         description=f"**Reportado:** {member.mention} (ID: `{member.id}`)\n**Reportado por:** {interaction.user.mention}\n**Razón:** {reason}",
@@ -827,29 +748,21 @@ async def slash_report(interaction: discord.Interaction, member: discord.Member,
         timestamp=datetime.now()
     )
     embed.set_footer(text=f"Reporte enviado desde #{interaction.channel.name}")
-
     await report_channel.send(content=mention_str, embed=embed)
     await interaction.response.send_message(embed=create_success_embed("Reporte Enviado", "Tu reporte ha sido enviado a los moderadores. Gracias."), ephemeral=True)
 
-
-# ----------------------------------------------------
-# 9. COMANDOS DE BODAS (PREFIX Y SLASH)
-# ----------------------------------------------------
 
 @bot.command(name='marry', description='💍 Propón matrimonio a otro usuario.')
 async def marry(ctx, member: discord.Member):
     user1_id = ctx.author.id
     user2_id = member.id
     guild_id = ctx.guild.id
-
     if user1_id == user2_id or member.bot:
         await ctx.send(embed=create_error_embed("Error", "No puedes casarte contigo mismo o con un bot."), delete_after=10)
         return
-
     if get_partner(user1_id, guild_id) or get_partner(user2_id, guild_id):
         await ctx.send(embed=create_error_embed("Error", "Uno de los usuarios ya está casado."), delete_after=10)
         return
-
     embed = discord.Embed(
         title="💍 Propuesta de Matrimonio",
         description=f"{member.mention}, **{ctx.author.display_name}** te ha propuesto matrimonio.\n\nReacciona con **✅** para aceptar o **❌** para rechazar.",
@@ -858,26 +771,21 @@ async def marry(ctx, member: discord.Member):
     message = await ctx.send(content=member.mention, embed=embed)
     await message.add_reaction("✅")
     await message.add_reaction("❌")
-
     def check(reaction, user):
         return user.id == user2_id and str(reaction.emoji) in ["✅", "❌"] and reaction.message.id == message.id
-
     try:
-        reaction, user = await bot.wait_for('reaction_add', timeout=60.0, check=check)
+        reaction, _ = await bot.wait_for('reaction_add', timeout=60.0, check=check)
     except asyncio.TimeoutError:
         await message.edit(embed=create_error_embed("Propuesta Expirada", "La propuesta de matrimonio ha expirado."), content=None)
         await message.clear_reactions()
         return
-
     if str(reaction.emoji) == "✅":
-        with closing(sqlite3.connect(DB_NAME)) as conn:
-            cursor = conn.cursor()
-            # Almacenar siempre en orden para evitar duplicados
-            u1, u2 = sorted([user1_id, user2_id])
-            cursor.execute("INSERT INTO marriages (user1_id, user2_id, guild_id, marriage_date) VALUES (?, ?, ?, ?)", 
-                           (u1, u2, guild_id, datetime.now().isoformat()))
-            conn.commit()
-
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                u1, u2 = sorted([user1_id, user2_id])
+                cursor.execute("INSERT INTO marriages (user1_id, user2_id, guild_id, marriage_date) VALUES (%s, %s, %s, %s)",
+                               (u1, u2, guild_id, datetime.now().isoformat()))
+                conn.commit()
         await message.edit(embed=create_success_embed("¡BODAS!", f"**{ctx.author.display_name}** y **{member.display_name}** ¡se han casado! 🎉"), content=f"{ctx.author.mention} {member.mention}")
         await message.clear_reactions()
     else:
@@ -889,17 +797,11 @@ async def divorce(ctx):
     user_id = ctx.author.id
     guild_id = ctx.guild.id
     partner_id = get_partner(user_id, guild_id)
-
     if not partner_id:
         await ctx.send(embed=create_error_embed("Error", "No estás casado con nadie."), delete_after=10)
         return
-
     partner = ctx.guild.get_member(partner_id)
-    if not partner:
-        partner_name = f"Usuario con ID {partner_id}"
-    else:
-        partner_name = partner.display_name
-
+    partner_name = partner.display_name if partner else f"Usuario con ID {partner_id}"
     embed = discord.Embed(
         title="💔 Solicitud de Divorcio",
         description=f"¿Estás seguro de que quieres divorciarte de **{partner_name}**?\n\nReacciona con **💔** para confirmar el divorcio.",
@@ -907,24 +809,19 @@ async def divorce(ctx):
     )
     message = await ctx.send(embed=embed)
     await message.add_reaction("💔")
-
     def check(reaction, user):
         return user.id == user_id and str(reaction.emoji) == "💔" and reaction.message.id == message.id
-
     try:
         await bot.wait_for('reaction_add', timeout=20.0, check=check)
     except asyncio.TimeoutError:
         await message.edit(embed=create_error_embed("Confirmación Expirada", "La solicitud de divorcio ha expirado."), content=None)
         await message.clear_reactions()
         return
-
-    # Procesa el divorcio
-    with closing(sqlite3.connect(DB_NAME)) as conn:
-        cursor = conn.cursor()
-        u1, u2 = sorted([user_id, partner_id])
-        cursor.execute("DELETE FROM marriages WHERE user1_id = ? AND user2_id = ? AND guild_id = ?", (u1, u2, guild_id))
-        conn.commit()
-
+    with get_db_connection() as conn:
+        with conn.cursor() as cursor:
+            u1, u2 = sorted([user_id, partner_id])
+            cursor.execute("DELETE FROM marriages WHERE user1_id = %s AND user2_id = %s AND guild_id = %s", (u1, u2, guild_id))
+            conn.commit()
     await message.edit(embed=create_success_embed("Divorcio Consumado", f"**{ctx.author.display_name}** se ha divorciado de **{partner_name}**. ¡Libertad!"), content=None)
     await message.clear_reactions()
 
@@ -933,49 +830,34 @@ async def spouse(ctx):
     user_id = ctx.author.id
     guild_id = ctx.guild.id
     data = get_marriage_data(user_id, guild_id)
-
     if not data:
         await ctx.send(embed=create_error_embed("Matrimonio", "No estás casado con nadie."), delete_after=10)
         return
-
-    user1_id, user2_id, date_str = data
-    partner_id = user2_id if user1_id == user_id else user1_id
+    _, _, date_str = data
+    partner_id = data[1] if data[0] == user_id else data[0]
     partner = ctx.guild.get_member(partner_id)
     partner_name = partner.display_name if partner else f"ID: {partner_id}"
-
     marriage_date = datetime.fromisoformat(date_str).strftime("%d de %B de %Y")
-
     embed = discord.Embed(
         title=f"❤️ Matrimonio de {ctx.author.display_name}",
         description=f"Estás casado(a) con **{partner_name}**.",
         color=discord.Color.red()
     )
     embed.add_field(name="Fecha de Aniversario", value=marriage_date, inline=False)
-
     await ctx.send(embed=embed)
 
 
 @bot.command(name="invite", help="¡Miau! Consigue el enlace para invitar a este michi a tu servidor.")
 async def invite_prefix(ctx):
-    """Maneja el comando de prefijo !invite."""
-
     invite_url = generate_invite_link(CLIENT_ID_INVITE, PERMISSION_CODE_INVITE)
-
     embed = discord.Embed(
         title="🎀 ¡Hora de Jugar! Invítame a tu Servidor",
         description=f"¡Miau! Soy un gatito muy útil. Haz clic en este enlace para adoptarme y que juegue en tu casa. ¡Te prometo muchos comandos y ronroneos!\n\n**[Invitar a {ctx.bot.user.name} 🐾]({invite_url})**",
         color=discord.Color.from_rgb(173, 216, 230) 
     )
     embed.set_thumbnail(url=ctx.bot.user.display_avatar.url)
-
-    
     await ctx.send(embed=embed)
 
-# ----------------------------------------------------
-# 10. COMANDOS DE ECONOMÍA Y NIVELES (PREFIX Y SLASH)
-# ----------------------------------------------------
-
-# --- COMANDOS DE ECONOMÍA (PREFIX) ---
 
 @bot.command(name='balance', aliases=['bal'])
 async def balance(ctx, member: discord.Member = None):
@@ -996,17 +878,14 @@ async def daily(ctx):
     last_daily = get_last_action_time(user_id, guild_id, 'daily')
     cooldown = ECONOMY_COOLDOWN_DAILY_HOURS * 3600
     current_time = time.time()
-
     if current_time - last_daily < cooldown:
         remaining_seconds = cooldown - (current_time - last_daily)
         remaining_hours = int(remaining_seconds // 3600)
         remaining_minutes = int((remaining_seconds % 3600) // 60)
         await ctx.send(embed=create_error_embed("En Cooldown", f"Debes esperar **{remaining_hours}h {remaining_minutes}m** para reclamar tu próxima recompensa diaria."), delete_after=10)
         return
-
     update_balance(user_id, guild_id, DAILY_REWARD)
     set_last_action_time(user_id, guild_id, 'daily')
-
     await ctx.send(embed=create_success_embed("Recompensa Diaria", f"Has reclamado tu recompensa diaria de **{DAILY_REWARD} 💰**."))
 
 
@@ -1017,21 +896,17 @@ async def work(ctx):
     last_work = get_last_action_time(user_id, guild_id, 'work')
     cooldown = ECONOMY_COOLDOWN_WORK_HOURS * 3600
     current_time = time.time()
-
     if current_time - last_work < cooldown:
         remaining_seconds = cooldown - (current_time - last_work)
         remaining_hours = int(remaining_seconds // 3600)
         remaining_minutes = int((remaining_seconds % 3600) // 60)
         await ctx.send(embed=create_error_embed("En Cooldown", f"Debes esperar **{remaining_hours}h {remaining_minutes}m** para volver a trabajar."), delete_after=10)
         return
-
     earnings = random.randint(100, 300)
     jobs = ["programar código", "servir café", "pasear perros", "reparar computadoras", "diseñar logos"]
     job = random.choice(jobs)
-
     update_balance(user_id, guild_id, earnings)
     set_last_action_time(user_id, guild_id, 'work')
-
     await ctx.send(embed=create_success_embed("Trabajo Realizado", f"Fuiste a **{job}** y ganaste **{earnings} 💰**."))
 
 
@@ -1044,14 +919,11 @@ async def flip(ctx, side: str, amount: int):
     if amount <= 0:
         await ctx.send(embed=create_error_embed("Error", "La cantidad debe ser positiva."), delete_after=10)
         return
-
     user_balance = get_balance(ctx.author.id, ctx.guild.id)
     if user_balance < amount:
         await ctx.send(embed=create_error_embed("Error", "No tienes suficiente dinero."), delete_after=10)
         return
-
     result = random.choice(['cara', 'cruz'])
-
     if result == side:
         update_balance(ctx.author.id, ctx.guild.id, amount)
         new_balance = user_balance + amount
@@ -1067,32 +939,24 @@ async def slots(ctx, amount: int):
     if amount <= 0:
         await ctx.send(embed=create_error_embed("Error", "La cantidad debe ser positiva."), delete_after=10)
         return
-
     user_balance = get_balance(ctx.author.id, ctx.guild.id)
     if user_balance < amount:
         await ctx.send(embed=create_error_embed("Error", "No tienes suficiente dinero."), delete_after=10)
         return
-
     emojis = ["🍒", "🍇", "🍋", "7️⃣"]
     results = [random.choice(emojis) for _ in range(3)]
-
     slot_display = f"| **{' | '.join(results)}** |"
-
     if results[0] == results[1] == results[2]:
-        # Jackpot: 7 veces la apuesta
         winnings = amount * 7
         update_balance(ctx.author.id, ctx.guild.id, winnings)
         embed = create_success_embed("¡JACKPOT! 🎰🎰🎰", f"{slot_display}\n¡Ganaste **{winnings} 💰**! (x7)")
     elif results[0] == results[1] or results[1] == results[2]:
-        # Doble: 2 veces la apuesta
         winnings = amount * 2
         update_balance(ctx.author.id, ctx.guild.id, winnings)
         embed = create_success_embed("¡Doble! 🎰🎰", f"{slot_display}\n¡Ganaste **{winnings} 💰**! (x2)")
     else:
-        # Perdiste
         update_balance(ctx.author.id, ctx.guild.id, -amount)
         embed = create_error_embed("Perdiste 💸", f"{slot_display}\nPerdiste **{amount} 💰**.")
-
     new_balance = get_balance(ctx.author.id, ctx.guild.id)
     embed.set_footer(text=f"Saldo actual: {new_balance} 💰")
     await ctx.send(embed=embed)
@@ -1103,51 +967,37 @@ async def rob(ctx, member: discord.Member):
     user_id = ctx.author.id
     guild_id = ctx.guild.id
     target_id = member.id
-
     if user_id == target_id or member.bot:
         await ctx.send(embed=create_error_embed("Error", "No puedes robarte a ti mismo o a un bot."), delete_after=10)
         return
-
     last_rob = get_last_action_time(user_id, guild_id, 'rob')
-    cooldown = 2 * 3600 # 2 horas de cooldown
+    cooldown = 2 * 3600
     current_time = time.time()
-
     if current_time - last_rob < cooldown:
         remaining_seconds = cooldown - (current_time - last_rob)
         remaining_hours = int(remaining_seconds // 3600)
         remaining_minutes = int((remaining_seconds % 3600) // 60)
         await ctx.send(embed=create_error_embed("En Cooldown", f"Debes esperar **{remaining_hours}h {remaining_minutes}m** para volver a robar."), delete_after=10)
         return
-
     target_balance = get_balance(target_id, guild_id)
     if target_balance < 1000:
         await ctx.send(embed=create_error_embed("Pobreza", f"{member.display_name} es demasiado pobre para ser robado (necesita al menos 1000 💰)."), delete_after=10)
         return
-
-    set_last_action_time(user_id, guild_id, 'rob') # Aplica cooldown antes del resultado
-
-    if random.random() < 0.4: # 40% de probabilidad de éxito
-        rob_amount = int(target_balance * random.uniform(0.1, 0.3)) # Roba entre 10% y 30%
-
+    set_last_action_time(user_id, guild_id, 'rob')
+    if random.random() < 0.4:
+        rob_amount = int(target_balance * random.uniform(0.1, 0.3))
         update_balance(user_id, guild_id, rob_amount)
         update_balance(target_id, guild_id, -rob_amount)
-
         await ctx.send(embed=create_success_embed("¡Robo Exitoso! 😈", f"Le robaste **{rob_amount} 💰** a {member.display_name}. ¡Huye!"))
     else:
-        # Fallo: pierde una multa
         fine = random.randint(100, 500)
         update_balance(user_id, guild_id, -fine)
-
         await ctx.send(embed=create_error_embed("¡Atrapado! 🚨", f"Fuiste atrapado intentando robar a {member.display_name}. Tuviste que pagar una multa de **{fine} 💰**."))
 
 
-# NUEVO CÓDIGO PARA /INVITE 
 @bot.tree.command(name="invite", description="¡Miau! Consigue el enlace para invitar a este michi a tu servidor.")
 async def invite_slash(interaction: discord.Interaction):
-    """Maneja el comando de barra diagonal /invite."""
-
     invite_url = generate_invite_link(CLIENT_ID_INVITE, PERMISSION_CODE_INVITE)
-
     embed = discord.Embed(
         title="🐾 ¡Adóptame! Enlace de Invitación",
         description=f"**{interaction.user.display_name}**, este michi necesita un hogar en tu servidor. ¡Haz clic en el botón para traerme!\n\n**[Invitación de Nexus Bot 🐱]({invite_url})**",
@@ -1155,27 +1005,23 @@ async def invite_slash(interaction: discord.Interaction):
     )
     embed.set_thumbnail(url=interaction.client.user.display_avatar.url)
     embed.set_footer(text="Gracias por querer a este gatito 💖")
-
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
-# --- COMANDOS DE NIVELACIÓN (PREFIX) ---
-
 def get_leaderboard_data(guild_id):
-    with closing(sqlite3.connect(DB_NAME)) as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT user_id, xp, level FROM leveling WHERE guild_id = ? ORDER BY level DESC, xp DESC LIMIT 10",
-            (guild_id,)
-        )
-        return cursor.fetchall()
+    with get_db_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT user_id, xp, level FROM leveling WHERE guild_id = %s ORDER BY level DESC, xp DESC LIMIT 10",
+                (guild_id,)
+            )
+            return cursor.fetchall()
 
 @bot.command(name='rank')
 async def rank(ctx, member: discord.Member = None):
     member = member or ctx.author
     xp, level, _ = get_level_data(member.id, ctx.guild.id)
     xp_needed_next = get_xp_needed(level)
-
     embed = discord.Embed(
         title=f"📊 Rango de {member.display_name}",
         description=f"**Nivel Actual:** {level}\n**XP:** {xp}/{xp_needed_next}\n**Progreso:** {'█' * int(xp * 10 / xp_needed_next)}",
@@ -1188,24 +1034,19 @@ async def rank(ctx, member: discord.Member = None):
 @bot.command(name='leaderboard', aliases=['top'])
 async def leaderboard(ctx):
     top_users = get_leaderboard_data(ctx.guild.id)
-
     if not top_users:
         await ctx.send(embed=create_error_embed("Error", "No hay datos de nivelación para mostrar."), delete_after=10)
         return
-
     description = []
     for i, (user_id, xp, level) in enumerate(top_users):
         member = ctx.guild.get_member(user_id)
         name = member.display_name if member else f"ID: {user_id}"
-
         rank_emoji = ""
         if i == 0: rank_emoji = "🥇"
         elif i == 1: rank_emoji = "🥈"
         elif i == 2: rank_emoji = "🥉"
         else: rank_emoji = f"#{i+1}"
-
         description.append(f"{rank_emoji} **{name}** - Nivel **{level}** (XP: {xp})")
-
     embed = discord.Embed(
         title="🏆 Tabla de Clasificación (Niveles)",
         description='\n'.join(description),
@@ -1214,7 +1055,6 @@ async def leaderboard(ctx):
     await ctx.send(embed=embed)
 
 
-# --- COMANDOS DE ADMIN DE ECONOMÍA (SLASH) ---
 @bot.tree.command(name='admin-setmoney', description='💰 Establece el saldo de un usuario.')
 @discord.app_commands.describe(member='El usuario al que quieres modificar el saldo.', amount='La nueva cantidad de saldo.')
 @discord.app_commands.checks.has_permissions(administrator=True)
@@ -1222,9 +1062,7 @@ async def slash_setmoney(interaction: discord.Interaction, member: discord.Membe
     if amount < 0:
         await interaction.response.send_message(embed=create_error_embed("Error", "La cantidad debe ser 0 o positiva."), ephemeral=True)
         return
-
     new_balance = set_balance(member.id, interaction.guild.id, amount)
-
     await interaction.response.send_message(embed=create_success_embed("Saldo Actualizado", f"El saldo de **{member.display_name}** ha sido establecido a **{new_balance} 💰**."), ephemeral=True)
 
 
@@ -1235,29 +1073,27 @@ async def slash_addshoprole(interaction: discord.Interaction, role: discord.Role
     if price <= 0:
         await interaction.response.send_message(embed=create_error_embed("Error", "El precio debe ser positivo."), ephemeral=True)
         return
-
-    with closing(sqlite3.connect(DB_NAME)) as conn:
-        cursor = conn.cursor()
-        cursor.execute("INSERT OR REPLACE INTO role_shop (guild_id, role_id, price) VALUES (?, ?, ?)", (interaction.guild.id, role.id, price))
-        conn.commit()
-
+    with get_db_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO role_shop (guild_id, role_id, price) VALUES (%s, %s, %s) ON CONFLICT (guild_id, role_id) DO UPDATE SET price = EXCLUDED.price",
+                (interaction.guild.id, role.id, price)
+            )
+            conn.commit()
     await interaction.response.send_message(embed=create_success_embed("Rol Añadido a la Tienda", f"El rol **{role.name}** está ahora a la venta por **{price} 💰**."), ephemeral=True)
 
 
 @bot.command(name='shop')
 async def shop(ctx):
     shop_roles = get_shop_roles(ctx.guild.id)
-
     if not shop_roles:
         await ctx.send(embed=create_error_embed("Tienda Vacía", "No hay roles a la venta en este momento."), delete_after=10)
         return
-
     description = []
     for role_id, price in shop_roles:
         role = ctx.guild.get_role(role_id)
         if role:
             description.append(f"**{role.name}** ➡️ **{price} 💰**")
-
     embed = discord.Embed(
         title="🛍️ Tienda de Roles",
         description='\n'.join(description) + "\n\nUsa `!buyrole <NombreDelRol>` para comprar.",
@@ -1270,58 +1106,62 @@ async def shop(ctx):
 async def buyrole(ctx, *, role_name: str):
     role_name = role_name.strip()
     shop_roles = get_shop_roles(ctx.guild.id)
-
     role_to_buy = None
     price = 0
-
     for role_id, p in shop_roles:
         role = ctx.guild.get_role(role_id)
         if role and role.name.lower() == role_name.lower():
             role_to_buy = role
             price = p
             break
-
     if not role_to_buy:
         await ctx.send(embed=create_error_embed("Error", f"El rol **{role_name}** no está a la venta."), delete_after=10)
         return
-
     if role_to_buy in ctx.author.roles:
         await ctx.send(embed=create_error_embed("Error", f"Ya tienes el rol **{role_to_buy.name}**."), delete_after=10)
         return
-
     user_balance = get_balance(ctx.author.id, ctx.guild.id)
     if user_balance < price:
         await ctx.send(embed=create_error_embed("Error", f"No tienes suficiente dinero. Necesitas **{price} 💰**."), delete_after=10)
         return
-
     try:
         update_balance(ctx.author.id, ctx.guild.id, -price)
         await ctx.author.add_roles(role_to_buy, reason="Compra de rol en la tienda.")
         new_balance = get_balance(ctx.author.id, ctx.guild.id)
-
         await ctx.send(embed=create_success_embed("Compra Exitosa", f"Has comprado el rol **{role_to_buy.name}** por **{price} 💰**. Saldo restante: {new_balance} 💰"))
     except discord.Forbidden:
         await ctx.send(embed=create_error_embed("Error de Permisos", "No puedo darte ese rol (puede que el rol esté por encima del mío)."), delete_after=10)
 
 
-# ----------------------------------------------------
-# 11. INICIO DEL BOT
-# ----------------------------------------------------
+app = Flask(__name__)
 
-if __name__ == '__main__':
-    TOKEN = os.getenv('DISCORD_TOKEN') 
+@app.route('/')
+def home():
+    return "El bot está vivo."
+
+def run_flask():
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)
+
+def run_bot():
+    TOKEN = os.getenv('DISCORD_TOKEN')
     if not TOKEN:
-         print("¡ADVERTENCIA! La variable DISCORD_TOKEN no está configurada en Secrets de Replit. El bot no se conectará.")
-    elif OWNER_ID == 00000000000000:
-        print("¡ADVERTENCIA! Por favor, reemplaza '1224791534436749354' con tu ID de usuario en la línea OWNER_ID.")
-    
-else:
-    
-
+        print("¡ERROR CRÍTICO! La variable DISCORD_TOKEN no está configurada. El bot no puede iniciarse.")
+        return
+    if not DATABASE_URL:
+        print("¡ERROR CRÍTICO! La variable DATABASE_URL no está configurada. El bot no puede conectarse a la base de datos.")
+        return
     print("Conectando el bot a Discord...")
     try:
         bot.run(TOKEN)
-    except discord.HTTPException:
-        print("ERROR: Token inválido o problema de conexión. Revisa tu Token.")
+    except discord.HTTPException as e:
+        print(f"ERROR: Token inválido o problema de conexión. Revisa tu Token. Error: {e.status} {e.text}")
     except Exception as e:
         print(f"Ocurrió un error inesperado al iniciar el bot: {e}")
+
+
+if __name__ == '__main__':
+    from threading import Thread
+    flask_thread = Thread(target=run_flask)
+    flask_thread.start()
+    run_bot()
