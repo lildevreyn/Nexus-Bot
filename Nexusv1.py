@@ -58,10 +58,15 @@ def get_db_connection():
         if not DATABASE_URL:
             print("ERROR: No se encontró la variable DATABASE_URL.")
             return None
-        conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+        
+        # connect_timeout=10' para que no tarde mucho en fallar si hay error
+        conn = psycopg2.connect(DATABASE_URL, sslmode='require', connect_timeout=10) 
         return conn
+    except psycopg2.OperationalError as e:
+        print(f"ERROR DE CONEXIÓN CRÍTICO: No se pudo conectar a Neon. Revise su DATABASE_URL. Detalle: {e}") 
+        return None
     except Exception as e:
-        print(f"Error conectando a la base de datos: {e}")
+        print(f"Error conectando a la base de datos (general): {e}")
         return None
 
 def initialize_db():
