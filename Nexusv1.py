@@ -62,14 +62,6 @@ class CustomHelpCommand(commands.HelpCommand):
         embed.add_field(name="❤️ Bodas (Prefix)", value='\n'.join(marriage_cmds), inline=False)
 
 
-        music_cmds = (
-            f"`{prefix}play <canción>` o `{prefix}p`: Reproduce música.",
-            f"`{prefix}stop`: Detiene la reproducción y desconecta.",
-            f"`{prefix}skip` o `{prefix}s`: Salta la canción actual."
-        )
-        embed.add_field(name="🎶 Música (Prefix)", value='\n'.join(music_cmds), inline=False)
-
-
         util_cmds = (
             "`/report <user> <razón>`: Reporta a un usuario.",
             "`/admin-setlogs <canal>`: Configura el canal de logs.",
@@ -484,19 +476,6 @@ async def on_message_delete(message: discord.Message):
             timestamp=datetime.now()
         )
         await log_channel.send(embed=embed)
-
-
-@bot.hybrid_command(name='play', aliases=['p'], description="Reproduce música en el canal de voz.")
-async def play(ctx, *, search: str):
-    await ctx.send(embed=create_error_embed("Función no Implementada", "La funcionalidad de música aún no está disponible."))
-
-@bot.hybrid_command(name='stop', description="Detiene la música y desconecta al bot.")
-async def stop(ctx):
-    await ctx.send(embed=create_error_embed("Función no Implementada", "La funcionalidad de música aún no está disponible."))
-
-@bot.hybrid_command(name='skip', aliases=['s'], description="Salta la canción actual.")
-async def skip(ctx):
-    await ctx.send(embed=create_error_embed("Función no Implementada", "La funcionalidad de música aún no está disponible."))
 
 
 @bot.command(name="sync")
